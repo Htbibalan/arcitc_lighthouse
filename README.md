@@ -3,7 +3,7 @@
 Lighthouse is a python GUI to control philips lights. 
 
 
-![Banner Image](https://github.com/Htbibalan/arctic_lighthouse/blob/main/src/banner_image.png)
+![Banner Image](https://github.com/Htbibalan/arctic_lighthouse-/blob/main/src/banner_image.png)
 
 
 ### Hardware Requirements
