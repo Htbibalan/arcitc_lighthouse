@@ -1,0 +1,84 @@
+{
+  "bridge_ip": "192.168.32.137",
+  "boxes_count": 8,
+  "box_assignments": {
+    "Box 1": "LIGHT1",
+    "Box 2": "LIGHT2",
+    "Box 3": "LIGHT3",
+    "Box 4": "LIGHT4",
+    "Box 5": "LIGHT5",
+    "Box 6": "LIGHT6",
+    "Box 7": "LIGHT7",
+    "Box 8": "LIGHT8"
+  },
+  "advanced_schedules": [
+    {
+      "name": "Boxes 1-4 day warm100 night red40",
+      "boxes": [
+        "Box 1",
+        "Box 2",
+        "Box 3",
+        "Box 4"
+      ],
+      "start_date": "2026-06-15",
+      "start_time": "06:00",
+      "end_date": "2026-06-15",
+      "end_time": "18:00",
+      "recurrence": "daily",
+      "every_n": 1,
+      "weekdays": [],
+      "until_date": "2026-06-21",
+      "start_state": {
+        "action": "set",
+        "bri": 100,
+        "preset": "warm",
+        "ct": null,
+        "xy": null,
+        "wavelength_nm": null
+      },
+      "end_state": {
+        "action": "set",
+        "bri": 40,
+        "preset": "red",
+        "ct": null,
+        "xy": null,
+        "wavelength_nm": null
+      },
+      "enabled": true
+    },
+    {
+      "name": "Boxes 5-8 day red40 night off",
+      "boxes": [
+        "Box 5",
+        "Box 6",
+        "Box 7",
+        "Box 8"
+      ],
+      "start_date": "2026-06-15",
+      "start_time": "06:00",
+      "end_date": "2026-06-15",
+      "end_time": "18:00",
+      "recurrence": "daily",
+      "every_n": 1,
+      "weekdays": [],
+      "until_date": "2026-06-21",
+      "start_state": {
+        "action": "set",
+        "bri": 40,
+        "preset": "red",
+        "ct": null,
+        "xy": null,
+        "wavelength_nm": null
+      },
+      "end_state": {
+        "action": "off",
+        "bri": null,
+        "preset": null,
+        "ct": null,
+        "xy": null,
+        "wavelength_nm": null
+      },
+      "enabled": true
+    }
+  ]
+}
