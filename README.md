@@ -3,9 +3,9 @@
 Lighthouse is a python GUI to control philips lights. 
 
 
-![Banner Image](src/banner_image.png)
-
-
+![Banner Image](src/cover_0.png)
+![spaces](src/cover_1.png)
+![activity](src/cover_2.png)
 ### Hardware Requirements
 
 
