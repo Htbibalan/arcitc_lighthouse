@@ -484,7 +484,7 @@ def schedule_from_dict(row: dict, targets: list[str]) -> Schedule:
 
 
 def csv_import(text: str, project: Project) -> list[Schedule]:
-    """Accept original 'boxes' and new 'spaces' CSVs. Fail atomically on bad rows."""
+    
     reader = csv.DictReader(io.StringIO(text.lstrip("\ufeff")))
     headers = set(reader.fieldnames or [])
     if "start_date" not in headers or not headers.intersection({"boxes", "spaces", "space_ids"}):
@@ -566,7 +566,7 @@ class HueError(RuntimeError):
 
 
 class HueController:
-    """Blocking local-API backend. GUI ALWAYS calls this through asyncio.to_thread."""
+    
     def __init__(self, auth_path: Path = AUTH_FILE, demo=False):
         self.auth_path, self.demo = auth_path, demo
         self.ip, self.username, self.bridge_id = "", "", ""
@@ -643,7 +643,7 @@ class HueController:
                     config = self.request("GET", "/config")
                 except HueError as ex:
                     if ex.code != 1:
-                        raise  # A network failure must not trigger fresh registration.
+                        raise  # A network failure must not trigger fresh registration. # maybe add the manual IP configurations on the readme file?
                     self.username = ""
             if not self.username:
                 if not allow_register:
@@ -1199,7 +1199,7 @@ class LighthouseApp:
             content=ft.Row([
                 ft.Container(content=ft.Icon(ft.Icons.LIGHTBULB_OUTLINE_ROUNDED, color=BG, size=27),
                              width=46, height=46, alignment=ft.Alignment.CENTER, bgcolor=ACCENT, border_radius=14),
-                ft.Column([text("Lighthouse", 23, weight=ft.FontWeight.W_600), small("SPACES  /  LIGHT CONTROL")], spacing=1),
+                ft.Column([text("Lighthouse", 23, weight=ft.FontWeight.W_600), small("Control your philips lights! 😎")], spacing=1),
                 ft.Container(expand=True),
                 pill("DEMO · no real lights", SUCCESS) if self.demo else ft.Container(),
                 ft.Container(content=ft.Row([self.bridge_dot, self.bridge_badge], spacing=8),
@@ -1245,7 +1245,7 @@ class LighthouseApp:
             controls.append(ft.Container(content=ft.Column([text("LOCAL CONTROL", 11, SUCCESS, ft.FontWeight.W_600),
                                                              small("Keep this app open and your computer awake.")], spacing=8),
                                            bgcolor=PANEL, border_radius=14, padding=14))
-            controls.append(ft.TextButton(content=text("Dev by Hamid Taghipourbibalan", 10, MUTED),
+            controls.append(ft.TextButton(content=text("Dev. by Hamid Taghipourbibalan", 10, MUTED),
                                            url="https://www.linkedin.com/in/hamid-taghipourbibalan-b7239088/"))
         self.sidebar.content = ft.Column(controls, spacing=6, expand=True)
 
