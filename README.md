@@ -146,10 +146,16 @@ For behavioural and circadian experiments:
 
 
 ## to do ⚙️
+
 **Add instructions for pairing Hue bridge and the Lighthouse**
+
 **explain the working of the json file - syntax**
+
 **add conda env installation guides**
+
 **create .exe setup file**
+
+
 
 
 
