@@ -1,10 +1,9 @@
-
-
 from __future__ import annotations
 
 import argparse
 import asyncio
 import copy
+import colorsys
 import csv
 import inspect
 import io
@@ -17,9 +16,12 @@ import os
 from pathlib import Path
 import re
 import sys
+import struct
 import threading
 import time
 import uuid
+import zlib
+from functools import lru_cache
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any, Callable, Optional
@@ -29,9 +31,9 @@ import requests
 try:
     import flet as ft
 except ImportError:
-    ft = None  # Core logic / unit tests can run without a graphical installation.
+    ft = None
 
-APP_VERSION = "7.0.0"
+APP_VERSION = "7.1.0"
 FLET_VERSION = "1.0.0"
 SCHEMA_VERSION = 3
 APP_DIR = Path.home() / ".lighthouse_flet"
@@ -44,10 +46,10 @@ PRESET_XY = {
     "warm": (0.501, 0.415), "cool": (0.300, 0.300),
 }
 SWATCHES = {"red": "#FF626C", "green": "#6BDD98", "blue": "#719CFF",
-            "white": "#F1F4F8", "warm": "#FFCE88", "cool": "#B2E5FF"}
+            "white": "#F1F4F8", "warm": "#A43BEB", "cool": "#B2E5FF"}
 BG, PANEL, PANEL_2 = "#0C111B", "#141D2B", "#1D293A"
-BORDER, TEXT, MUTED = "#2A374A", "#EFF4FC", "#9BAEC6"
-ACCENT, SUCCESS, DANGER = "#FFC778", "#79DDB5", "#FF8F9B"
+BORDER, TEXT, MUTED = "#71A1AA", "#EFF4FC", "#7DC3EC"
+ACCENT, SUCCESS, DANGER = "#F3C90F", "#DAF108", "#FF8F9B"
 
 
 def new_id() -> str:
@@ -84,7 +86,7 @@ def required_date(s: str, label="Date") -> date:
     if result is None:
         raise ValueError(f"{label}: use YYYY-MM-DD or DD/MM/YYYY.")
     if result.year < 1900 or result.year > 2200:
-        raise ValueError(f"{label}: supported years are 1900–2200.")
+        raise ValueError(f"{label}: supported years are up to 2200. :)) unless this software, you and philips lights survived doomsday?")
     return result
 
 
@@ -128,10 +130,7 @@ def parse_xy(raw: Any) -> Optional[tuple[float, float]]:
 
 
 def wavelength_to_xy_nm(wavelength_nm: float) -> tuple[float, float]:
-    """Original approximate visual colour conversion, NOT spectral calibration.
-
-    Hue lamps mix LEDs; selecting 470 nm does not produce monochromatic 470 nm light. so the users better measure the acutral output and then write dwon the desired values.
-    """
+    
     w = number(wavelength_nm, "Wavelength", 380, 700)
     if w < 440:
         r, g, b = -(w - 440) / 60, 0., 1.
@@ -154,6 +153,84 @@ def wavelength_to_xy_nm(wavelength_nm: float) -> tuple[float, float]:
     return (X / (X + Y + Z), Y / (X + Y + Z)) if X + Y + Z else PRESET_XY["white"]
 
 
+COLOUR_WHEEL_ROTATION = 3 * math.pi / 4
+
+
+def srgb_to_xy(red: float, green: float, blue: float) -> tuple[float, float]:
+    values = [number(v, "RGB channel", 0, 1) for v in (red, green, blue)]
+    r, g, b = [v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4 for v in values]
+    x = 0.4123907992659593 * r + 0.3575843393838780 * g + 0.1804807884018343 * b
+    y = 0.2126390058715103 * r + 0.7151686787677560 * g + 0.0721923153607337 * b
+    z = 0.0193308187155918 * r + 0.1191947797946260 * g + 0.9505321522496607 * b
+    total = x + y + z
+    return (x / total, y / total) if total > 1e-15 else PRESET_XY["white"]
+
+
+def xy_to_srgb(xy) -> tuple[float, float, float]:
+    point = parse_xy(xy)
+    if point is None:
+        return 1.0, 1.0, 1.0
+    x, y = point
+    z = max(0.0, 1.0 - x - y)
+    linear = (
+        3.240969941904523 * x - 1.537383177570094 * y - 0.498610760293003 * z,
+        -0.969243636280880 * x + 1.875967501507721 * y + 0.041555057407176 * z,
+        0.055630079696994 * x - 0.203976958888977 * y + 1.056971514242879 * z,
+    )
+    maximum = max(linear)
+    if maximum <= 1e-15:
+        return 1.0, 1.0, 1.0
+    normalised = [clamp(v / maximum, 0.0, 1.0) for v in linear]
+    return tuple(clamp(12.92 * v if v <= 0.0031308 else 1.055 * v ** (1.0 / 2.4) - 0.055, 0.0, 1.0)
+                 for v in normalised)
+
+
+def rgb_hex(rgb) -> str:
+    return "#" + "".join(f"{round(clamp(v, 0.0, 1.0) * 255):02X}" for v in rgb)
+
+
+def wheel_hs_at(px: float, py: float, size: float, inset: float) -> tuple[float, float]:
+    radius = size / 2.0 - inset
+    if radius <= 0:
+        raise ValueError("The colour wheel must be larger than its margins.")
+    dx, dy = px - size / 2.0, py - size / 2.0
+    saturation = clamp(math.hypot(dx, dy) / radius, 0.0, 1.0)
+    hue = ((math.atan2(dy, dx) - COLOUR_WHEEL_ROTATION) / math.tau) % 1.0
+    return hue, saturation
+
+
+def wheel_position(hue: float, saturation: float, size: float, inset: float) -> tuple[float, float]:
+    radius = (size / 2.0 - inset) * clamp(saturation, 0.0, 1.0)
+    angle = hue * math.tau + COLOUR_WHEEL_ROTATION
+    return size / 2.0 + radius * math.cos(angle), size / 2.0 + radius * math.sin(angle)
+
+
+@lru_cache(maxsize=2)
+def colour_wheel_png(size: int = 512) -> bytes:
+    size = number(size, "Wheel image size", 32, 1024, True)
+    centre = size / 2.0
+    raw = bytearray()
+    for row in range(size):
+        raw.append(0)
+        dy = row + 0.5 - centre
+        for column in range(size):
+            dx = column + 0.5 - centre
+            distance = math.hypot(dx, dy)
+            alpha = round(255 * clamp(centre - distance + 0.5, 0.0, 1.0))
+            if not alpha:
+                raw.extend((0, 0, 0, 0))
+                continue
+            hue = ((math.atan2(dy, dx) - COLOUR_WHEEL_ROTATION) / math.tau) % 1.0
+            rgb = colorsys.hsv_to_rgb(hue, min(distance / centre, 1.0), 1.0)
+            raw.extend((round(rgb[0] * 255), round(rgb[1] * 255), round(rgb[2] * 255), alpha))
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(bytes(raw), 6))
+            + chunk(b"IEND", b""))
+
+
 def as_bool(value: Any, default=True) -> bool:
     if value is None or value == "":
         return default
@@ -170,7 +247,7 @@ class LightState:
     ct: Optional[int] = None
     xy: Optional[tuple[float, float]] = None
     wavelength_nm: Optional[float] = None
-    transitiontime: int = 4  # Hue units = 0.1 second; original default = 0.4 s.
+    transitiontime: int = 4
 
     def validate(self):
         self.action = str(self.action).strip().lower()
@@ -206,7 +283,7 @@ class LightState:
         cmd = {"on": self.action != "off", "transitiontime": self.transitiontime}
         if self.action != "off" and self.bri is not None:
             cmd["bri"] = self.bri
-        # ON intentionally preserves colour; only SET changes colour. # Maybe I need to get rid of this in the future versions
+
         if self.action == "set":
             xy = self.resolved_xy()
             if xy is not None:
@@ -308,7 +385,7 @@ class Schedule:
         return self
 
     def occurrence_before(self, d: date) -> Optional[date]:
-        """Last occurrence date <= d, using arithmetic rather than a lookback cap."""
+        
         sd = required_date(self.start_date)
         if self.until_date:
             d = min(d, required_date(self.until_date))
@@ -332,7 +409,7 @@ class Schedule:
         return None
 
     def occurrence_after(self, d: date) -> Optional[date]:
-        """First occurrence date >= d. Weekly blocks are anchored at start_date."""
+        
         sd = required_date(self.start_date)
         d = max(d, sd)
         until = required_date(self.until_date) if self.until_date else None
@@ -363,7 +440,7 @@ class Schedule:
         return start, end
 
     def boundary(self, now: datetime, future=False):
-        """Return nearest past (<= now) or next future (> now) START/END."""
+        
         if not self.enabled:
             return None
         if self.recurrence == "once":
@@ -387,8 +464,8 @@ class Schedule:
         candidates = [x for x in candidates if (x[0] > now if future else x[0] <= now)]
         if not candidates:
             return None
-        # A new START wins over an immediately preceding END at the same instant
-        # (e.g. a daily 08:00–08:00 cycle), avoiding a false all-day OFF state.
+
+
         key = lambda x: (x[0], x[1] == ("end" if future else "start"))
         return (min if future else max)(candidates, key=key)
 
@@ -484,7 +561,7 @@ def schedule_from_dict(row: dict, targets: list[str]) -> Schedule:
 
 
 def csv_import(text: str, project: Project) -> list[Schedule]:
-    
+
     reader = csv.DictReader(io.StringIO(text.lstrip("\ufeff")))
     headers = set(reader.fieldnames or [])
     if "start_date" not in headers or not headers.intersection({"boxes", "spaces", "space_ids"}):
@@ -566,14 +643,14 @@ class HueError(RuntimeError):
 
 
 class HueController:
-    
+
     def __init__(self, auth_path: Path = AUTH_FILE, demo=False):
         self.auth_path, self.demo = auth_path, demo
         self.ip, self.username, self.bridge_id = "", "", ""
         self.lights: dict[str, dict] = {}
         self.lock = threading.RLock()
         self.http = requests.Session()
-        self.http.trust_env = False  # Never send Bridge LAN traffic via proxy settings.
+        self.http.trust_env = False
         self.last_success: Optional[datetime] = None
         if demo:
             for i, name in enumerate(["Ceiling A", "Ceiling B", "Day lamp", "Night lamp", "Bench left", "Bench right", "Cage lamp A", "Cage lamp B"], 1):
@@ -612,7 +689,7 @@ class HueController:
             response.raise_for_status()
             data = self.check_errors(response.json())
         except requests.RequestException as ex:
-            # Do not expose requests' URL, which contains the secret API username.
+
             raise HueError(f"Bridge {self.ip} did not respond successfully ({type(ex).__name__}). Check LAN and power.") from None
         except ValueError:
             raise HueError("Bridge returned a non-JSON response.") from None
@@ -643,7 +720,7 @@ class HueController:
                     config = self.request("GET", "/config")
                 except HueError as ex:
                     if ex.code != 1:
-                        raise  # A network failure must not trigger fresh registration. # maybe add the manual IP configurations on the readme file?
+                        raise
                     self.username = ""
             if not self.username:
                 if not allow_register:
@@ -667,7 +744,7 @@ class HueController:
             return self.refresh()
 
     def discover(self):
-        
+
         try:
             r = requests.get("https://discovery.meethue.com", timeout=(4, 6))
             r.raise_for_status()
@@ -712,7 +789,7 @@ class HueController:
             elif "ct" in cmd:
                 cached["colormode"] = "ct"
             self.last_success = datetime.now()
-            
+
             return copy.deepcopy(light)
 
 
@@ -725,7 +802,7 @@ def resolve_ref(ref: LightRef, lights: dict[str, dict]) -> Optional[str]:
         return next((lid for lid, info in lights.items() if info.get("uniqueid") == ref.uniqueid), None)
     if ref.id:
         return ref.id if ref.id in lights else None
-    # Old Lighthouse ( on tkinter) disambiguated duplicate names as 'Name (id:3)'.
+
     match = re.fullmatch(r"(.*?) \(id:(\d+)\)", ref.name)
     if match:
         name, lid = match.groups()
@@ -782,7 +859,7 @@ def desired_by_light(project: Project, lights: dict, now: datetime):
 
 
 class ScheduleEngine:
-    
+
     def __init__(self, app):
         self.app = app
         self.applied: dict[str, tuple] = {}
@@ -815,7 +892,7 @@ class ScheduleEngine:
             async with a.io_lock:
                 if not a.project.scheduler_enabled or not a.connected or a.closing:
                     return
-                # Re-evaluate after acquiring the lock: the user or clock may have changed.
+
                 current, _ = desired_by_light(a.project, a.lights, now or datetime.now())
                 job = current.get(lid)
                 if job is None or self.applied.get(lid) == job.token:
@@ -838,8 +915,8 @@ class ScheduleEngine:
                     self.retries[lid] = (sent_token, time.monotonic() + delay, attempts)
                     a.log(f"Schedule command failed: {job.space.name} · {ex}. Recheck in {delay}s.", "warning")
             if now is None:
-                await asyncio.sleep(.12)  # Modest pacing for individual-light Hue commands.
-        # Do not retain failed work for removed lights/schedules forever.
+                await asyncio.sleep(.12)
+
         self.retries = {k: v for k, v in self.retries.items() if k in jobs}
 
 
@@ -874,7 +951,7 @@ class WorkspaceLock:
             self.handle.close()
             self.handle = None
 
-#flet UI helpers API 1.0.0
+
 def text(value, size=14, color=TEXT, weight=None, **kwargs):
     return ft.Text(str(value), size=size, color=color, weight=weight, **kwargs)
 
@@ -912,7 +989,7 @@ def input_border():
 
 
 def field(label, value="", **kwargs):
-    # FormFieldControl in Flet 1.0 uses helper/bgcolor, not helper_text/fill_color. bummer.
+
     if "helper_text" in kwargs:
         kwargs["helper"] = kwargs.pop("helper_text")
         kwargs.setdefault("helper_max_lines", 3)
@@ -933,13 +1010,171 @@ def kind_icon(kind):
             }.get(kind, ft.Icons.SPACE_DASHBOARD_OUTLINED)
 
 
+class ColourWheel:
+    def __init__(self, app, on_change: Callable, initial_xy=None, size: int = 288):
+        self.app, self.on_change = app, on_change
+        self.size, self.inset = float(size), 16.0
+        self.radius = self.size / 2.0 - self.inset
+        self.hue, self.saturation = 0.0, 0.0
+        self.xy = PRESET_XY["white"]
+        self._pressed = False
+        self._dragging = False
+        self._press_point = None
+        self.marker_icon = ft.Icon(ft.Icons.LIGHTBULB_OUTLINE_ROUNDED, size=15, color=BG)
+        self.marker = ft.Container(
+            content=self.marker_icon, width=28, height=28,
+            alignment=ft.Alignment.CENTER, bgcolor="#FFFFFF",
+            border=ft.Border.all(3, "#FFFFFF"), border_radius=14,
+            shadow=ft.BoxShadow(spread_radius=1, blur_radius=7, color="#99000000", offset=ft.Offset(0, 1)),
+            left=self.size / 2.0 - 14, top=self.size / 2.0 - 14,
+        )
+        diameter = self.radius * 2
+        self.stack = ft.Stack(
+            width=self.size, height=self.size, clip_behavior=ft.ClipBehavior.NONE,
+            controls=[
+                ft.Image(src=colour_wheel_png(), width=diameter, height=diameter,
+                         left=self.inset, top=self.inset, fit=ft.BoxFit.CONTAIN,
+                         gapless_playback=True, semantics_label="Colour wheel: white in the centre, saturated colours around the edge"),
+                self.marker,
+            ],
+        )
+        self.gesture = ft.GestureDetector(
+            content=ft.Container(content=self.stack, width=self.size, height=self.size, bgcolor="#00000000"),
+            mouse_cursor=ft.MouseCursor.CLICK, drag_interval=16,
+            on_pan_down=self.pointer_down, on_tap_down=self.tap_down, on_tap_up=self.tap_up,
+            on_pan_start=self.pan_start, on_pan_update=self.pan_update,
+            on_pan_end=self.pan_end, on_pan_cancel=self.pan_cancel,
+        )
+        self.preview = ft.Container(width=36, height=36, bgcolor="#FFFFFF", border_radius=12,
+                                    border=ft.Border.all(1, BORDER))
+        self.coordinates = text("", 13, TEXT, ft.FontWeight.W_600, selectable=True)
+        self.preview_note = text("", 11, MUTED, max_lines=3)
+        self.content = ft.Container(
+            content=ft.Column([
+                ft.Row([text("Choose a colour", 14, weight=ft.FontWeight.W_600),
+                        ft.Container(expand=True),
+                        ft.TextButton(content="White", on_click=self.reset_white)], spacing=8),
+                ft.Container(content=self.gesture, alignment=ft.Alignment.CENTER),
+                ft.Row([self.preview, ft.Column([small("SELECTED COLOUR"), self.coordinates], spacing=3)],
+                       alignment=ft.MainAxisAlignment.CENTER, spacing=12),
+                small("Click anywhere in the circle or drag the light marker."),
+                ft.Container(content=self.preview_note, height=42),
+            ], spacing=9),
+            bgcolor=BG, padding=12, border_radius=16, border=ft.Border.all(1, BORDER),
+        )
+        self.set_xy(initial_xy or PRESET_XY["white"])
+
+    @staticmethod
+    def event_point(e):
+        position = getattr(e, "local_position", None)
+        if position is not None:
+            if isinstance(position, dict):
+                x, y = position.get("x"), position.get("y")
+            else:
+                x, y = getattr(position, "x", None), getattr(position, "y", None)
+        else:
+            x, y = getattr(e, "local_x", None), getattr(e, "local_y", None)
+        try:
+            x, y = float(x), float(y)
+        except (TypeError, ValueError):
+            return None
+        return (x, y) if math.isfinite(x) and math.isfinite(y) else None
+
+    def hit_test(self, point):
+        if point is None:
+            return False
+        x, y = point
+        cx, cy = wheel_position(self.hue, self.saturation, self.size, self.inset)
+        return (math.hypot(x - self.size / 2.0, y - self.size / 2.0) <= self.radius
+                or math.hypot(x - cx, y - cy) <= 14)
+
+    def paint(self, rgb=None):
+        rgb = rgb or colorsys.hsv_to_rgb(self.hue, self.saturation, 1.0)
+        x, y = wheel_position(self.hue, self.saturation, self.size, self.inset)
+        colour = rgb_hex(rgb)
+        self.marker.left, self.marker.top = x - 14, y - 14
+        self.marker.bgcolor = self.preview.bgcolor = colour
+        self.marker_icon.color = BG if 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2] > 0.58 else "#FFFFFF"
+        self.coordinates.value = f"x {self.xy[0]:.6f}   y {self.xy[1]:.6f}"
+        preview_xy = srgb_to_xy(*rgb)
+        outside = math.hypot(preview_xy[0] - self.xy[0], preview_xy[1] - self.xy[1]) > 0.00002
+        self.preview_note.value = (
+            "Approximate screen colour shown; your exact XY coordinates are preserved."
+            if outside else "Screen preview only; lamp colours may differ. Brightness is adjusted separately."
+        )
+
+    def set_xy(self, xy):
+        point = parse_xy(xy)
+        if point is None:
+            return
+        self.xy = point
+        rgb = xy_to_srgb(point)
+        hue, saturation, _ = colorsys.rgb_to_hsv(*rgb)
+        self.hue = hue if saturation > 1e-8 else self.hue
+        self.saturation = saturation
+        self.paint(rgb)
+
+    def select(self, point):
+        if point is None or self.app.closing:
+            return
+        self.hue, self.saturation = wheel_hs_at(*point, self.size, self.inset)
+        rgb = colorsys.hsv_to_rgb(self.hue, self.saturation, 1.0)
+        self.xy = tuple(round(v, 6) for v in srgb_to_xy(*rgb))
+        self.paint(rgb)
+        self.on_change(self.xy)
+
+    async def pointer_down(self, e):
+        point = self.event_point(e)
+        self._press_point = point
+        self._pressed = self.hit_test(point)
+        self._dragging = False
+        if self._pressed:
+            self.select(point)
+
+    async def tap_down(self, e):
+        if not self._dragging:
+            point = self.event_point(e)
+            if self.hit_test(point):
+                self.select(point)
+
+    async def tap_up(self, e):
+        point = self.event_point(e)
+        if self.hit_test(point):
+            self.select(point)
+        self._pressed, self._dragging, self._press_point = False, False, None
+
+    async def pan_start(self, e):
+        point = self.event_point(e)
+        if self._press_point is None:
+            self._pressed = self.hit_test(point)
+        self._dragging = self._pressed
+        if self._dragging:
+            self.select(point)
+
+    async def pan_update(self, e):
+        if self._dragging:
+            self.select(self.event_point(e))
+
+    async def pan_end(self, e):
+        if self._dragging:
+            self.select(self.event_point(e))
+        self._pressed, self._dragging, self._press_point = False, False, None
+
+    async def pan_cancel(self, e):
+        self._pressed, self._dragging, self._press_point = False, False, None
+
+    async def reset_white(self, e):
+        self.select((self.size / 2.0, self.size / 2.0))
+
+
 class StateEditor:
-    """Reusable form, with exactly one colour mode selected at a time."""
     def __init__(self, app, title: str, initial: Optional[LightState] = None):
         self.app = app
         state = copy.deepcopy(initial or LightState(preset="white"))
         mode = "preset" if state.preset else "wavelength" if state.wavelength_nm is not None else (
             "xy" if state.xy is not None else "ct" if state.ct is not None else "keep")
+        initial_xy = state.resolved_xy() or PRESET_XY["white"]
+        self.last_preset = state.preset or "white"
         self.action = dropdown("Action", state.action, [("set", "SET · brightness + colour"),
                                ("on", "ON · keep previous colour"), ("off", "OFF")], on_select=self.changed)
         self.use_bri = ft.Checkbox(label="Set brightness", value=state.bri is not None, on_change=self.changed)
@@ -951,12 +1186,18 @@ class StateEditor:
                                     on_change=self.slider_changed)
         self.brightness_row = ft.Row([self.bri_slider, self.bri])
         self.mode = dropdown("Colour mode", mode, [("keep", "Keep existing colour"), ("preset", "Colour preset"),
-                              ("ct", "Colour temperature (CT)"), ("xy", "XY coordinates"),
+                              ("ct", "Colour temperature (CT)"), ("xy", "Colour wheel / XY coordinates"),
                               ("wavelength", "Approximate wavelength colour")], on_select=self.changed)
-        self.preset = dropdown("Preset", state.preset or "white", [(k, k.title()) for k in PRESET_XY])
+        self.preset = dropdown("Preset / custom colour", state.preset or "custom",
+                               [("custom", "Custom · colour wheel / XY")] + [(k, k.title()) for k in PRESET_XY],
+                               on_select=self.preset_changed)
         self.ct = field("Colour temperature · mired (153–500)", state.ct if state.ct is not None else 370,
                         helper_text="CT is in mired, not Kelvin. Supported range also depends on the lamp.")
-        self.xy = field("XY coordinates · x,y", f"{state.xy[0]},{state.xy[1]}" if state.xy else "0.3127,0.3290")
+        self.xy = field("XY coordinates · x,y", f"{initial_xy[0]},{initial_xy[1]}",
+                        helper_text="Drag the marker above, or type exact CIE x,y coordinates.",
+                        on_change=self.xy_changed)
+        self.xy_error = text("", 12, DANGER, visible=False)
+        self.wheel = ColourWheel(self.app, self.wheel_changed, initial_xy)
         self.wavelength = field("Approximate wavelength colour · nm", state.wavelength_nm or 470,
                                 helper_text="380–700 nm visual approximation; not monochromatic or calibrated output.")
         self.transition = field("Transition · seconds", f"{state.transitiontime / 10:g}",
@@ -964,21 +1205,47 @@ class StateEditor:
         self.hint = small("")
         swatches = []
         for name, colour in SWATCHES.items():
-            swatches.append(ft.Container(content=text(name.title(), 11, BG if name in ("white", "warm", "cool", "green") else BG,
-                                                        ft.FontWeight.W_600),
+            swatches.append(ft.Container(content=text(name.title(), 11, BG, ft.FontWeight.W_600),
                                           bgcolor=colour, border_radius=10, padding=10,
                                           on_click=self.choose_preset(name)))
         self.swatches = ft.Row(swatches, wrap=True, spacing=7, run_spacing=7)
         self.content = ft.Column([text(title, 18, weight=ft.FontWeight.W_600), self.action, self.hint,
                                   self.use_bri, self.brightness_row, self.mode, self.swatches,
-                                  self.preset, self.ct, self.xy, self.wavelength, self.transition], spacing=13)
+                                  self.wheel.content, self.preset, self.ct, self.xy, self.xy_error,
+                                  self.wavelength, self.transition], spacing=13)
         self.changed(update=False)
 
     def choose_preset(self, name):
         def select(e):
             self.action.value, self.mode.value, self.preset.value = "set", "preset", name
+            self.last_preset = name
+            self.xy_error.value = ""
             self.changed()
         return select
+
+    def preset_changed(self, e):
+        self.action.value = "set"
+        self.mode.value = "preset" if self.preset.value in PRESET_XY else "xy"
+        self.changed()
+
+    def wheel_changed(self, xy):
+        self.action.value, self.mode.value, self.preset.value = "set", "xy", "custom"
+        self.xy.value = f"{xy[0]:.6f}, {xy[1]:.6f}"
+        self.xy_error.value = ""
+        self.changed(update=False, sync_wheel=False)
+        self.app.update()
+
+    def xy_changed(self, e):
+        self.action.value, self.mode.value, self.preset.value = "set", "xy", "custom"
+        self.xy_error.value = ""
+        try:
+            point = parse_xy(self.xy.value)
+            if point is not None:
+                self.wheel.set_xy(point)
+        except ValueError as ex:
+            self.xy_error.value = str(ex)
+        self.changed(update=False, sync_wheel=False)
+        self.app.update()
 
     def slider_changed(self, e):
         self.bri.value = str(round(self.bri_slider.value))
@@ -989,16 +1256,38 @@ class StateEditor:
             self.bri_slider.value = number(self.bri.value, "Brightness", 0, 254, True)
             self.app.update()
         except ValueError:
-            pass  # Allow partial typing. Apply/Save performs strict validation.
+            pass
 
-    def changed(self, e=None, update=True):
+    def changed(self, e=None, update=True, sync_wheel=True):
         off, colour = self.action.value == "off", self.action.value == "set"
+        wheel_mode = self.mode.value in ("preset", "xy")
         self.use_bri.disabled = off
         self.brightness_row.disabled = off or not self.use_bri.value
         self.mode.disabled = not colour
-        self.swatches.visible = colour and self.mode.value == "preset"
-        for name, control in [("preset", self.preset), ("ct", self.ct), ("xy", self.xy), ("wavelength", self.wavelength)]:
-            control.visible = colour and self.mode.value == name
+        self.swatches.visible = colour and wheel_mode
+        self.wheel.content.visible = colour and wheel_mode
+        self.preset.visible = colour and wheel_mode
+        self.xy.visible = colour and wheel_mode
+        self.ct.visible = colour and self.mode.value == "ct"
+        self.wavelength.visible = colour and self.mode.value == "wavelength"
+        if sync_wheel:
+            if self.mode.value == "preset":
+                if self.preset.value not in PRESET_XY:
+                    self.preset.value = self.last_preset
+                self.last_preset = self.preset.value
+                point = PRESET_XY[self.preset.value]
+                self.xy.value = f"{point[0]},{point[1]}"
+                self.xy_error.value = ""
+                self.wheel.set_xy(point)
+            elif self.mode.value == "xy":
+                self.preset.value = "custom"
+                try:
+                    point = parse_xy(self.xy.value)
+                    if point is not None:
+                        self.wheel.set_xy(point)
+                except ValueError:
+                    pass
+        self.xy_error.visible = colour and wheel_mode and bool(self.xy_error.value)
         self.hint.value = ("Turns lights off. Colour and brightness entries are ignored." if off else
                            "ON preserves the lamp's existing colour. Use SET when a protocol changes colour."
                            if not colour else "SET turns lights on and applies the selected brightness and colour.")
@@ -1021,11 +1310,10 @@ class StateEditor:
             elif mode == "xy":
                 s.xy = parse_xy(self.xy.value)
                 if s.xy is None:
-                    raise ValueError("Enter XY coordinates.")
+                    raise ValueError("Choose a colour on the wheel or enter XY coordinates.")
             elif mode == "wavelength":
                 s.wavelength_nm = number(self.wavelength.value, "Wavelength", 380, 700)
         return s.validate()
-
 
 class LighthouseApp:
     def __init__(self, page, workspace: Path, demo=False):
@@ -1064,7 +1352,7 @@ class LighthouseApp:
             try:
                 self.project, self.startup_warnings = Project.from_dict(json.loads(workspace.read_text(encoding="utf-8-sig")))
             except Exception as ex:
-                # Do NOT overwrite a broken workspace by starting a fresh autosave.
+
                 raise RuntimeError(f"Could not load {workspace}. Your file has not been changed.\n\n{ex}\n\n"
                                    "Inspect the file or start with --workspace followed by a new JSON path.") from ex
         if demo and workspace.exists() and (self.project.bridge_id not in ("", "DEMO") or
@@ -1086,7 +1374,7 @@ class LighthouseApp:
                                                    start_date=today, end_date=today, start_time="06:00", end_time="18:00",
                                                    start_state=LightState(preset="white", bri=200),
                                                    end_state=LightState(preset="red", bri=40)).validate()]
-            self.project.scheduler_enabled = False  # Preview never arms itself.
+            self.project.scheduler_enabled = False
         self._build_shell()
 
     def bind(self, fn: Callable, *args, **kwargs):
@@ -1107,7 +1395,7 @@ class LighthouseApp:
         try:
             self.page.update()
         except Exception:
-            # A client may disappear while an HTTP request is finishing.
+
             self.logger.exception("UI update could not be delivered")
 
     def log(self, message, level="info"):
@@ -1120,7 +1408,7 @@ class LighthouseApp:
             self.last_event.value = f"{stamp}  {message}"
 
     def notice(self, message, error=False):
-        # Use a dialog for errors: unlike a short toast, details remain readable.
+
         if error:
             self.show_dialog("Please check", ft.Container(content=text(message), width=540),
                              [button("Close", self.bind(self.close_dialog))])
@@ -1199,7 +1487,7 @@ class LighthouseApp:
             content=ft.Row([
                 ft.Container(content=ft.Icon(ft.Icons.LIGHTBULB_OUTLINE_ROUNDED, color=BG, size=27),
                              width=46, height=46, alignment=ft.Alignment.CENTER, bgcolor=ACCENT, border_radius=14),
-                ft.Column([text("Lighthouse", 23, weight=ft.FontWeight.W_600), small("Control your philips lights! 😎")], spacing=1),
+                ft.Column([text("Lighthouse", 23, weight=ft.FontWeight.W_600), small("Control and schedule your philips lights! ")], spacing=10),
                 ft.Container(expand=True),
                 pill("DEMO · no real lights", SUCCESS) if self.demo else ft.Container(),
                 ft.Container(content=ft.Row([self.bridge_dot, self.bridge_badge], spacing=8),
@@ -1293,18 +1581,18 @@ class LighthouseApp:
                                 val, small(note)], spacing=8), col={"xs": 12, "sm": 6, "lg": 3})
 
     def overview_view(self):
-        items = [self.heading("Your light environment", "Organise spaces. Set the light. Keep your protocols in view.",
+        items = [self.heading("Your light environment", "Organize spaces and keep the running protocols in view.",
                                [button("Create spaces", self.bind(self.create_spaces_dialog), ft.Icons.ADD, primary=True)])]
         if not self.project.spaces:
-            items.append(self.empty("Start with your spaces", "Create rooms, boxes, cages or compartments, give them meaningful names, "
-                                    "then assign one or more Hue lights to each space. Nothing is created automatically.",
+            items.append(self.empty("Start with your spaces", "Create rooms, boxes, cages or compartments,  "
+                                    "then assign one or more Hue lights to each space.",
                                     button("Create my first spaces", self.bind(self.create_spaces_dialog), ft.Icons.ADD, primary=True)))
             items.append(card(ft.Column([text("Already use Lighthouse?", 18, weight=ft.FontWeight.W_600),
-                                          small("Import the JSON configuration saved by your old GUI. Its boxes become spaces that you can rename."),
+                                          small("Import your existing configuration to continue where you left off."),
                                           button("Import existing configuration", self.bind(self.import_project), ft.Icons.UPLOAD_FILE)], spacing=12)))
             return self.screen(items)
         items.append(ft.ResponsiveRow([
-            self.stat("Spaces", lambda: len(self.project.spaces), "Named for the way you work", ft.Icons.SPACE_DASHBOARD_OUTLINED),
+            self.stat("Spaces", lambda: len(self.project.spaces), "", ft.Icons.SPACE_DASHBOARD_OUTLINED),
             self.stat("Assigned lights", lambda: len({r.key for s in self.project.spaces for r in s.lights}), "One or more per space", ft.Icons.LIGHTBULB_OUTLINE_ROUNDED),
             self.stat("Lights on", lambda: sum(bool(l.get("state", {}).get("on")) for l in self.lights.values()) if self.connected else "—",
                       "Latest Bridge-reported state", ft.Icons.WB_SUNNY_OUTLINED),
@@ -1350,7 +1638,9 @@ class LighthouseApp:
             ft.Row([ft.Container(content=ft.Icon(kind_icon(space.kind), color=ACCENT, size=25), bgcolor=PANEL_2,
                                   padding=12, border_radius=14), ft.Container(expand=True), pill(space.kind, MUTED),
                      ft.IconButton(icon=ft.Icons.EDIT_OUTLINED, icon_color=MUTED, tooltip="Rename / edit space",
-                                    on_click=self.bind(self.edit_space_dialog, space.id))]),
+                                    on_click=self.bind(self.edit_space_dialog, space.id)),
+                     ft.IconButton(icon=ft.Icons.DELETE_FOREVER_SHARP, icon_color=DANGER, tooltip="Delete space",
+                                    on_click=self.bind(self.remove_space, space.id))]),
             ft.Container(content=text(space.name, 21, weight=ft.FontWeight.W_600, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
                          on_click=self.bind(self.go, "space_detail", space.id)),
             text(light_names, 12, MUTED, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
@@ -1373,12 +1663,12 @@ class LighthouseApp:
         query = field("Find a space", "", prefix_icon=ft.Icons.SEARCH)
         def search(e):
             q = (query.value or "").casefold()
-            # Keep existing cards/controls: changing visibility does not discard user edits.
+
             for s, control in zip(self.project.spaces, listing.controls):
                 control.visible = q in (s.name + " " + s.kind).casefold()
             self.update()
         query.on_change = search
-        return self.screen([self.heading("Spaces", "Use your own names. Add spaces individually or create a numbered batch.",
+        return self.screen([self.heading("Spaces", "Create spaces to assign lights",
                                            [button("Create spaces", self.bind(self.create_spaces_dialog), ft.Icons.ADD, primary=True)]),
                             query, listing if self.project.spaces else self.empty("No spaces yet", "Start with a room, a box, a cage or a compartment.",
                                                                                 button("Create spaces", self.bind(self.create_spaces_dialog), primary=True))])
@@ -1504,7 +1794,7 @@ class LighthouseApp:
         related = sum(sid in s.spaces for s in self.project.schedules)
         def remove():
             self.project.spaces = [s for s in self.project.spaces if s.id != sid]
-            # Delete only schedules that would otherwise have no targets. Inform before confirmation to ensure the user understands the implications.
+
             kept = []
             for s in self.project.schedules:
                 s.spaces = [x for x in s.spaces if x != sid]
@@ -1514,7 +1804,7 @@ class LighthouseApp:
             self.persist()
             self.log(f"Removed space '{space.name}'. No light command was sent.")
             self.go("spaces")
-        self.confirm("Remove " + space.name + "?", f"This removes the space and its assignments, not the physical lights. "
+        self.confirm("Remove " + space.name + "?", f"This removes the space and its assignments"
                      f"It is targeted by {related} schedule(s). Those schedules lose this target; schedules with no remaining targets are deleted. "
                      "The lights retain their current state.", remove, "Remove space", danger=True)
 
@@ -1557,7 +1847,7 @@ class LighthouseApp:
                     if other.id != sid:
                         other.lights = [r for r in other.lights if resolve_ref(r, self.lights) not in wanted]
             s.lights = [make_ref(lid, self.lights[lid]) for lid in wanted] + [r for r, cb in unresolved if cb.value]
-            # Reconcile changed assignments without wiping unrelated manual overrides.
+
             for lid in affected:
                 self.engine.applied.pop(lid, None)
                 self.engine.retries.pop(lid, None)
@@ -1577,9 +1867,9 @@ class LighthouseApp:
             move, small("An active schedule can affect newly assigned lamps immediately after saving."), error], spacing=13, tight=True)),
             [button("Cancel", self.bind(self.close_dialog)), button("Save assignments", self.bind(save), ft.Icons.CHECK, primary=True)])
 
-    # manual control of individual lights or spaces, outside of schedules
+
     def lights_view(self):
-        controls = [self.heading("All lights", "Live bridge inventory · control lamps individually or assign them to spaces.",
+        controls = [self.heading("All lights", "Live bridge inventory ",
                                  button("Refresh lights", self.bind(self.refresh_lights), ft.Icons.REFRESH))]
         if not self.lights:
             controls.append(self.empty("Connect your Hue Bridge", "Your available lights will appear here after connecting.",
@@ -1687,8 +1977,8 @@ class LighthouseApp:
         self.set_busy(1)
         successes, failures = [], []
         try:
-            # One lock for the whole batch prevents schedule commands interleaving
-            
+
+
             async with self.io_lock:
                 for lid in targets:
                     if self.closing or not self.connected:
@@ -1702,8 +1992,8 @@ class LighthouseApp:
                     except Exception as ex:
                         failures.append(f"{self.lights.get(lid, {}).get('name', lid)}: {ex}")
                     await asyncio.sleep(.12)
-                # Manual overrides last until the next boundary, explicit sync,
-                # reconnect, or a relevant schedule/assignment change.
+
+
                 self.engine.manual_override(successes)
             self.live_dirty = True
             if failures:
@@ -1716,7 +2006,7 @@ class LighthouseApp:
             self.manual_busy = False
             self.set_busy(-1)
 
-    # Schedule and timing settings where the user can define start and end states for spaces, with optional recurrence.
+
     def schedule(self, schedule_id):
         for s in self.project.schedules:
             if s.id == schedule_id:
@@ -1751,7 +2041,7 @@ class LighthouseApp:
         self.live_updaters.append(refresh)
         return card(ft.Column([ft.Row([text("Coming up", 19, weight=ft.FontWeight.W_600, expand=True),
                                         button("Schedules", self.bind(self.go, "schedules"))]),
-                               small("Local computer time. Paused schedules are displayed but will not execute."), rows], spacing=16))
+                               small(""), rows], spacing=16))
 
     def schedules_view(self):
         controls = [self.heading("Schedules", "Start and end states for your named spaces.",
@@ -1763,7 +2053,7 @@ class LighthouseApp:
                     button("Pause" if enabled else "Resume", self.bind(self.toggle_scheduler),
                            ft.Icons.PAUSE if enabled else ft.Icons.PLAY_ARROW, primary=not enabled)]),
             small("The application must stay open and the computer awake. An enabled scheduler synchronizes to the latest "
-                  "boundary on connect/resume; it does not replay every missed event."),
+                  ""),
             ft.Row([button("Synchronize now", self.bind(self.sync_now), ft.Icons.SYNC),
                     button("Import CSV", self.bind(self.import_csv), ft.Icons.UPLOAD_FILE),
                     button("Export CSV", self.bind(self.export_csv), ft.Icons.DOWNLOAD),
@@ -1805,8 +2095,7 @@ class LighthouseApp:
                         button("Apply END now", self.bind(self.apply_schedule, s.id, "end")),
                         button("Remove", self.bind(self.remove_schedule, s.id), ft.Icons.DELETE_OUTLINE, danger=True)],
                        wrap=True, spacing=8, run_spacing=8)], spacing=15)))
-        controls.append(small("Overlapping schedules: the most recent boundary wins for each physical lamp. "
-                              "At identical times, the later schedule in this list wins. Avoid conflicting protocols."))
+        controls.append(small("Avoid conflicting protocols."))
         return self.screen(controls)
 
     def date_control(self, label, value=""):
@@ -1978,7 +2267,7 @@ class LighthouseApp:
         await self.engine.tick()
         self.log("Schedule synchronization checked; failed/missing targets remain visible in Activity.")
 
-    # bridge settings...and import json file....might move it up? later.
+
     def settings_view(self):
         self.ip_field = field("Hue Bridge IP address", self.project.bridge_ip if not self.demo else "Demo bridge", expand=True)
         self.ip_field.disabled = self.demo
@@ -1994,36 +2283,34 @@ class LighthouseApp:
             self.persist()
             self.go("settings")
         return self.screen([
-            self.heading("Bridge & project", "Local light control, saved spaces and portable protocols."),
+            self.heading("Bridge & project", ""),
             card(ft.Column([
                 text("Hue Bridge", 20, weight=ft.FontWeight.W_600),
-                small("Connect the computer and Bridge to the same trusted local network. For first-time registration, "
-                      "press the Bridge's physical link button immediately before Connect / Register."),
+                small("Connect the computer and the Bridge to the same local network. you can find the IP address of your Bridge in the networks folder on a windows computer."),
                 ft.Row([self.ip_field, button("Discover online", self.bind(self.discover_bridge), ft.Icons.SEARCH,
                                               disabled=self.demo)]),
                 ft.Row([button("Connect / Register", self.bind(self.connect), ft.Icons.LINK, primary=True, disabled=self.demo),
                         button("Refresh lights", self.bind(self.refresh_lights), ft.Icons.REFRESH),
                         button("Disconnect", self.bind(self.disconnect), ft.Icons.LINK_OFF, disabled=self.demo)],
                        wrap=True, spacing=8, run_spacing=8), auto,
-                small("Discovery needs internet. Normal control uses the Bridge IP locally; no cloud account is required by this code. "
+                small("Discovery needs internet( also press the button on the Bridge for pairing). Normal control uses the Bridge IP locally "
                       "Previously saved Lighthouse credentials are reused when available."),
                 text("Bound Bridge: " + (self.project.bridge_id or "Not bound yet"), 12, MUTED, selectable=True)], spacing=16)),
             card(ft.Column([
                 text("Workspace", 20, weight=ft.FontWeight.W_600), ft.Row([title, button("Save name", self.bind(save_title))]),
                 small("Spaces, light assignments and schedules are saved automatically. Export JSON for a portable backup. "
-                      "Import accepts your original Box-based Lighthouse configuration and pauses the scheduler for review."),
+                      ""),
                 ft.Row([button("Import JSON", self.bind(self.import_project), ft.Icons.UPLOAD_FILE),
                         button("Export JSON", self.bind(self.export_project), ft.Icons.DOWNLOAD),
                         button("Import schedules CSV", self.bind(self.import_csv)),
                         button("Export schedules CSV", self.bind(self.export_csv))], wrap=True, spacing=8, run_spacing=8),
                 text(str(self.workspace), 12, MUTED, selectable=True),
-                small("Renaming a space does not rename a Hue lamp or create/modify rooms in the official Hue app.")], spacing=16)),
+                small("Renaming a space does not rename a Hue lamp or create/modify rooms in the official Hue app on your phone.")], spacing=16)),
             card(ft.Column([
                 text("Before an unattended protocol", 20, weight=ft.FontWeight.W_600),
                 text("Keep this application open, keep the computer awake, and verify the computer's local date and time."),
-                text("Brightness uses Hue's 0–254 scale. ON keeps the previous colour; SET applies a colour explicitly. "
-                     "The wavelength option is an approximate display colour, not a calibrated or monochromatic light source."),
-                
+                text("mock run the schedule to check for errors or mismatches , i.e. manually change date and time to see if the schedule is working as expected."),
+
                 small(f"Lighthouse Spaces {APP_VERSION} · Flet {FLET_VERSION} .")], spacing=15))])
 
     def normalize_assignments(self):
@@ -2144,7 +2431,7 @@ class LighthouseApp:
         return data.decode("utf-8-sig")
 
     async def save_text(self, name, extension, contents):
-        # Flet 1.0 writes src_bytes itself on desktop; do not write twice afterward.
+
         path = await self.file_picker.save_file(file_name=name, file_type=ft.FilePickerFileType.CUSTOM,
                                                 allowed_extensions=[extension], src_bytes=contents.encode("utf-8"))
         if path:
@@ -2211,14 +2498,14 @@ class LighthouseApp:
             raise ValueError("There are no schedules to export.")
         await self.save_text("lighthouse_schedules.csv", "csv", csv_export(self.project))
 
-    # clean shut down section
+
     def activity_view(self):
         self.activity_list = ft.ListView(expand=True, spacing=6, auto_scroll=True)
         self.render_logs()
         return ft.Column([
-            self.heading("Activity", "Commands, connection checks, imports and validation messages.",
+            self.heading("Activity log", "Here you can check the reports of commands, schedules and errors.",
                          button("Export log", self.bind(self.export_log), ft.Icons.DOWNLOAD)),
-            small("A successful command means the Bridge accepted it; it is not an independent measurement of emitted light."),
+            small("A successful command means the Bridge accepted it; check the validity of the command yourself."),
             ft.Container(content=self.activity_list, expand=True, bgcolor=PANEL, padding=18, border_radius=18,
                          border=ft.Border.all(1, BORDER))], expand=True, spacing=16)
 
@@ -2286,8 +2573,8 @@ class LighthouseApp:
             if self.save_pending:
                 await self.save_workspace()
             self.update_status()
-            # Only live readouts change here; forms and manually typed values are
-            # never rebuilt by a timer, slider update
+
+
             for updater in tuple(self.live_updaters):
                 try:
                     updater()
@@ -2325,7 +2612,7 @@ class LighthouseApp:
         self.project.scheduler_enabled = bool(self.project.scheduler_enabled)
         self.save_pending = True
         await self.save_workspace()
-        # Let any already-sent request finish before releasing the HTTP session.
+
         async with self.io_lock:
             self.hue.http.close()
         for task in getattr(self, "_tasks", []):
