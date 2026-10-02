@@ -10,6 +10,28 @@
 Lighthouse is a Python GUI for controlling and scheduling Philips Hue lights.
 
 
+## Easy installation 💾
+
+For Windows users, the easiest way to install Lighthouse is to use the pre-built installer.
+
+## Download
+
+Download the latest Windows installer from the GitHub Releases page:
+
+[Download Lighthouse_Setup_v1.0.0.exe](https://github.com/Htbibalan/arcitc_lighthouse/releases/latest)
+
+Then:
+
+1. Run `Lighthouse_Setup_v1.0.0.exe`
+2. Follow the installation steps
+3. Launch Lighthouse from the Start Menu or desktop shortcut
+4. Connect your computer and Philips Hue Bridge to the same local network
+5. Enter the Hue Bridge IP address in Lighthouse
+6. Press the Hue Bridge button and click **Connect / Register**
+
+
+
+
 
 ![Banner Image](src/cover_0.png)
 ![spaces](src/cover_1.png)
@@ -151,7 +173,10 @@ For behavioural and circadian experiments:
 * Verify the the light and colour transitions before leaving the experiment unattended ( Manually change date/time on the computer)
 * Keep a written record of the protocol used in each experiment.
 
+## Citation
 
+**Taghipourbibalan, H. (2026).** *Lighthouse* (Version 1.0.0) [Software]. Zenodo.  
+https://doi.org/10.5281/zenodo.23099376
 
 ## to do ⚙️
 
@@ -161,7 +186,7 @@ For behavioural and circadian experiments:
 
 **add conda env installation guides**
 
-**create .exe setup file**
+~~create .exe setup file~~
 
 
 
