@@ -19,8 +19,8 @@ authors:
 version: "1.0.0"
 date-released: "2026-10-02"
 
-repository-code: "https://github.com/Htbibalan/arcitc_lighthouse"
-url: "https://github.com/Htbibalan/arcitc_lighthouse"
+repository-code: "https://github.com/Htbibalan/lighthouse-lab"
+url: "https://github.com/Htbibalan/lighthouse-lab"
 
 abstract: >
   Lighthouse is a desktop application for local control and scheduling

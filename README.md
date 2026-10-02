@@ -18,7 +18,7 @@ For Windows users, the easiest way to install Lighthouse is to use the pre-built
 
 Download the latest Windows installer from the GitHub Releases page:
 
-[Download Lighthouse_Setup_v1.0.0.exe](https://github.com/Htbibalan/arcitc_lighthouse/releases/latest)
+[Download Lighthouse_Setup_v1.0.0.exe](https://github.com/Htbibalan/lighthouse-lab/releases/latest)
 
 Then:
 

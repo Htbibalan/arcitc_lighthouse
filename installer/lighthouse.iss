@@ -2,9 +2,9 @@
 AppName=Lighthouse
 AppVersion=1.0.0
 AppPublisher=Hamid Taghipourbibalan
-AppPublisherURL=https://github.com/Htbibalan/arcitc_lighthouse
-AppSupportURL=https://github.com/Htbibalan/arcitc_lighthouse
-AppUpdatesURL=https://github.com/Htbibalan/arcitc_lighthouse/releases
+AppPublisherURL=https://github.com/Htbibalan/lighthouse-lab
+AppSupportURL=https://github.com/Htbibalan/lighthouse-lab
+AppUpdatesURL=https://github.com/Htbibalan/lighthouse-lab/releases
 
 DefaultDirName={autopf}\Lighthouse
 DefaultGroupName=Lighthouse
