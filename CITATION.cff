@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+message: "If you use Lighthouse in your research, please cite the software using the citation below."
+
+title: "Lighthouse"
+type: software
+
+authors:
+  - family-names: "Taghipourbibalan"
+    given-names: "Hamid"
+
+version: "1.0.0"
+date-released: "2026-10-02"
+
+repository-code: "https://github.com/Htbibalan/arcitc_lighthouse"
+url: "https://github.com/Htbibalan/arcitc_lighthouse"
+
+abstract: >
+  Lighthouse is a desktop application for local control and scheduling
+  of Philips Hue lighting in configurable experimental environments.
+  It supports organization of lights into rooms, boxes, cages,
+  compartments, and other spaces, together with manual light control
+  and scheduled lighting protocols.
