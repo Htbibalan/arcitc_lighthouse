@@ -33,7 +33,7 @@ try:
 except ImportError:
     ft = None
 
-APP_VERSION = "7.1.0"
+APP_VERSION = "1.0.0"
 FLET_VERSION = "1.0.0"
 SCHEMA_VERSION = 3
 APP_DIR = Path.home() / ".lighthouse_flet"
@@ -41,12 +41,12 @@ AUTH_FILE = Path.home() / ".lighthouse_hue_auth.json"
 KINDS = ["Room", "Box", "Cage", "Compartment", "Space"]
 WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 PRESET_XY = {
-    "red": (0.675, 0.322), "green": (0.409, 0.518),
+    "red": (0.675, 0.322), "green": (0.170, 0.700),
     "blue": (0.167, 0.040), "white": (0.3127, 0.3290),
     "warm": (0.501, 0.415), "cool": (0.300, 0.300),
 }
 SWATCHES = {"red": "#FF626C", "green": "#6BDD98", "blue": "#719CFF",
-            "white": "#F1F4F8", "warm": "#A43BEB", "cool": "#B2E5FF"}
+            "white": "#F1F4F8", "warm": "#FFD39B", "cool": "#B2E5FF"}
 BG, PANEL, PANEL_2 = "#0C111B", "#141D2B", "#1D293A"
 BORDER, TEXT, MUTED = "#71A1AA", "#EFF4FC", "#7DC3EC"
 ACCENT, SUCCESS, DANGER = "#F3C90F", "#DAF108", "#FF8F9B"
@@ -86,7 +86,7 @@ def required_date(s: str, label="Date") -> date:
     if result is None:
         raise ValueError(f"{label}: use YYYY-MM-DD or DD/MM/YYYY.")
     if result.year < 1900 or result.year > 2200:
-        raise ValueError(f"{label}: supported years are up to 2200. :)) unless this software, you and philips lights survived doomsday?")
+        raise ValueError(f"{label}: Really? it is beyond year 2200 and you, the philips lights and everything else survived doomsday? Has AI replaced you guys? or are you still doing the drudgery?")
     return result
 
 
@@ -187,6 +187,74 @@ def xy_to_srgb(xy) -> tuple[float, float, float]:
 
 def rgb_hex(rgb) -> str:
     return "#" + "".join(f"{round(clamp(v, 0.0, 1.0) * 255):02X}" for v in rgb)
+
+
+def light_colour(state: dict) -> tuple[str, str]:
+    mode = state.get("colormode")
+    if mode is None:
+        mode = "xy" if state.get("xy") else "ct" if state.get("ct") is not None else "hs"
+    try:
+        if mode == "ct":
+            ct = number(state.get("ct"), "Colour temperature", 1, 1_000_000)
+            name = "Warm white" if ct >= 300 else "Cool white" if ct <= 230 else "White"
+            swatch = "warm" if ct >= 300 else "cool" if ct <= 230 else "white"
+            return f"{name} · {1_000_000 / ct:.0f} K", SWATCHES[swatch]
+        if mode == "xy":
+            xy = parse_xy(state.get("xy"))
+            if xy is None:
+                return "Colour unavailable", MUTED
+            rgb = xy_to_srgb(xy)
+            nearest = min(PRESET_XY, key=lambda key: math.dist(xy, PRESET_XY[key]))
+            if math.dist(xy, PRESET_XY[nearest]) <= 0.015:
+                name = {"warm": "Warm white", "cool": "Cool white"}.get(nearest, nearest.title())
+                return name, rgb_hex(rgb)
+        elif mode == "hs":
+            hue = number(state.get("hue"), "Hue", 0, 65535) / 65535
+            saturation = number(state.get("sat"), "Saturation", 0, 254) / 254
+            rgb = colorsys.hsv_to_rgb(hue, saturation, 1.0)
+        else:
+            return "Colour unavailable", MUTED
+    except (ValueError, TypeError, OverflowError):
+        return "Colour unavailable", MUTED
+    hue, saturation, _ = colorsys.rgb_to_hsv(*rgb)
+    degrees = hue * 360
+    if saturation < 0.12:
+        name = "White"
+    elif degrees < 15 or degrees >= 345:
+        name = "Red"
+    elif degrees < 45:
+        name = "Orange"
+    elif degrees < 75:
+        name = "Yellow"
+    elif degrees < 165:
+        name = "Green"
+    elif degrees < 195:
+        name = "Cyan"
+    elif degrees < 260:
+        name = "Blue"
+    elif degrees < 290:
+        name = "Violet"
+    else:
+        name = "Magenta"
+    return name, rgb_hex(rgb)
+
+
+def light_state_display(state: dict) -> tuple[str, str]:
+    if state.get("reachable") is False:
+        return "Unreachable", DANGER
+    if state.get("on") is None:
+        return "State unavailable", MUTED
+    if not state.get("on"):
+        return "Off", MUTED
+    name, colour = light_colour(state)
+    items = [name if name != "Colour unavailable" else "On"]
+    if state.get("bri") is not None:
+        try:
+            bri = number(state["bri"], "Brightness", 0, 254, True)
+            items.append(f"Brightness {bri}/254 ({bri / 254:.0%})")
+        except (ValueError, TypeError):
+            items.append("Brightness unavailable")
+    return " · ".join(items), colour
 
 
 def wheel_hs_at(px: float, py: float, size: float, inset: float) -> tuple[float, float]:
@@ -1199,9 +1267,9 @@ class StateEditor:
         self.xy_error = text("", 12, DANGER, visible=False)
         self.wheel = ColourWheel(self.app, self.wheel_changed, initial_xy)
         self.wavelength = field("Approximate wavelength colour · nm", state.wavelength_nm or 470,
-                                helper_text="380–700 nm visual approximation; not monochromatic or calibrated output.")
+                                helper_text="380–700 nm visual approximation; you need to measure for exact spectrum.")
         self.transition = field("Transition · seconds", f"{state.transitiontime / 10:g}",
-                               helper_text="0 = immediate; 0.4 s matches your original default.")
+                               helper_text="0 = immediate, how long it takes to fade to the new state")
         self.hint = small("")
         swatches = []
         for name, colour in SWATCHES.items():
@@ -1338,6 +1406,8 @@ class LighthouseApp:
         self.activity_list = None
         self.busy_count = 0
         self.startup_warnings = []
+        self.workspace_started = bool(demo)
+        self.workspace_backup_pending = not demo and workspace.exists()
         self.logger = logging.getLogger("lighthouse." + str(id(self)))
         self.logger.setLevel(logging.INFO)
         try:
@@ -1348,7 +1418,7 @@ class LighthouseApp:
             self.logger.addHandler(handler)
         except OSError:
             self.logger.addHandler(logging.StreamHandler())
-        if workspace.exists():
+        if demo and workspace.exists():
             try:
                 self.project, self.startup_warnings = Project.from_dict(json.loads(workspace.read_text(encoding="utf-8-sig")))
             except Exception as ex:
@@ -1443,6 +1513,7 @@ class LighthouseApp:
                           button(yes_label, self.bind(yes), primary=not danger, danger=danger)])
 
     def persist(self):
+        self.workspace_started = True
         self.save_pending = True
         if hasattr(self, "save_label"):
             self.save_label.value = "Saving…"
@@ -1450,8 +1521,18 @@ class LighthouseApp:
     async def save_workspace(self):
         async with self.save_lock:
             self.save_pending = False
+            if not self.workspace_started:
+                return
             payload = json.dumps(self.project.to_dict(), ensure_ascii=False, indent=2)
             try:
+                if self.workspace_backup_pending:
+                    backup = self.workspace.with_name(self.workspace.stem + ".before_new_" +
+                                                      datetime.now().strftime("%Y%m%d_%H%M%S_%f") + ".json")
+                    if self.workspace.exists():
+                        previous = await asyncio.to_thread(self.workspace.read_bytes)
+                        await asyncio.to_thread(backup.write_bytes, previous)
+                        self.log(f"Previous autosaved workspace preserved at {backup}.")
+                    self.workspace_backup_pending = False
                 await asyncio.to_thread(atomic_write, self.workspace, payload)
                 self.saved_at = datetime.now().strftime("%H:%M:%S")
                 self.save_error = ""
@@ -1500,7 +1581,7 @@ class LighthouseApp:
         self.body = ft.Container(expand=True, padding=ft.Padding.symmetric(horizontal=28, vertical=24))
         self.last_event = text("Ready. Create spaces, connect the Bridge, then assign your lights.", 11, MUTED,
                                max_lines=1, overflow=ft.TextOverflow.ELLIPSIS, expand=True)
-        self.save_label = text("Autosave on", 11, MUTED)
+        self.save_label = text("Autosave on" if self.demo else "Fresh workspace · autosave on", 11, MUTED)
         footer = ft.Container(padding=ft.Padding.symmetric(horizontal=22, vertical=10), bgcolor=BG,
             border=ft.Border(top=ft.BorderSide(1, BORDER)),
             content=ft.Row([self.last_event, self.scheduler_badge, self.save_label], spacing=20))
@@ -1624,6 +1705,73 @@ class LighthouseApp:
         return ("All lights off", MUTED) if on == 0 else (
             ("All lights on", SUCCESS) if on == len(states) else (f"{on} of {len(states)} on", ACCENT))
 
+    def space_schedule_details(self, space, now=None):
+        now = now or datetime.now()
+        schedules = [(i, s) for i, s in enumerate(self.project.schedules) if space.id in s.spaces]
+        enabled = [(i, s) for i, s in schedules if s.enabled]
+        if not enabled:
+            return ("Schedules disabled" if schedules else "No schedules"), ""
+        past, future = [], []
+        for i, schedule in enabled:
+            boundary = schedule.boundary(now)
+            if boundary is not None:
+                dt, which = boundary
+                past.append(((dt, i, int(which == "end")), schedule, which))
+            boundary = schedule.boundary(now, future=True)
+            if boundary is not None:
+                dt, which = boundary
+                future.append(((dt, -i), schedule, which))
+        suffix = " · paused" if not self.project.scheduler_enabled else (
+            " · Bridge not connected" if not self.connected else "")
+        if past:
+            _, schedule, which = max(past, key=lambda item: item[0])
+            state = schedule.start_state if which == "start" else schedule.end_state
+            current = f"Schedule target{suffix}: {schedule.name} · {which.upper()}\n{state.summary()}"
+        else:
+            current = "Schedule not started" + suffix
+        if future:
+            (dt, _), schedule, which = min(future, key=lambda item: item[0])
+            state = schedule.start_state if which == "start" else schedule.end_state
+            upcoming = f"Next: {dt:%d %b %Y · %H:%M} · {schedule.name} · {which.upper()}\n{state.summary()}"
+        else:
+            upcoming = "No upcoming schedule changes."
+        return current, upcoming
+
+    def space_live_details(self, space):
+        rows, entries = [], []
+        for ref in space.lights:
+            swatch = ft.Container(width=12, height=12, border_radius=6, bgcolor=MUTED,
+                                  tooltip="Approximate colour preview from the latest light state.")
+            label = text("", 12, expand=True)
+            rows.append(ft.Row([swatch, label], spacing=8, vertical_alignment=ft.CrossAxisAlignment.START))
+            entries.append((ref, swatch, label))
+        schedule_label, next_label = text("", 12, MUTED), text("", 11, MUTED)
+        def refresh():
+            for ref, swatch, label in entries:
+                lid = resolve_ref(ref, self.lights)
+                info = self.lights.get(lid, {}) if lid is not None else {}
+                name = info.get("name") or ref.name or "Unknown light"
+                if not self.connected:
+                    details, colour = "Bridge not connected", MUTED
+                elif lid is None:
+                    details, colour = "Missing from Bridge", DANGER
+                else:
+                    details, colour = light_state_display(info.get("state", {}))
+                label.value = (f"{name}: " if len(entries) > 1 else "") + details
+                label.color = DANGER if colour == DANGER else TEXT
+                label.tooltip = (f"{name}\n{details}\n"
+                                 "Latest reported/commanded state; colour names and swatches are approximate.\n"
+                                 "Brightness uses the same 0–254 scale as the controls.")
+                swatch.bgcolor = colour
+            schedule_label.value, next_label.value = self.space_schedule_details(space)
+            next_label.visible = bool(next_label.value)
+        refresh()
+        self.live_updaters.append(refresh)
+        return ft.Column([
+            *([small("LIGHT SETTINGS"), *rows] if rows else []),
+            schedule_label, next_label,
+        ], spacing=8)
+
     def space_card(self, space):
         status, colour = self.space_status(space)
         label = text(status, 12, colour)
@@ -1645,6 +1793,7 @@ class LighthouseApp:
                          on_click=self.bind(self.go, "space_detail", space.id)),
             text(light_names, 12, MUTED, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
             label,
+            self.space_live_details(space),
             ft.Row([small(f"{len(space.lights)} light{'s' if len(space.lights) != 1 else ''}"),
                      ft.Container(expand=True), small(f"{enabled} schedule{'s' if enabled != 1 else ''}")]),
             ft.Divider(color=BORDER, height=1),
@@ -1690,6 +1839,7 @@ class LighthouseApp:
                          [button("Rename / edit", self.bind(self.edit_space_dialog, sid), ft.Icons.EDIT_OUTLINED),
                           button("Assign lights", self.bind(self.assign_dialog, sid), ft.Icons.ADD_LINK, primary=True)]),
             card(ft.Column([status, text(", ".join(r.name for r in space.lights) or "No lights assigned", 14),
+                             self.space_live_details(space),
                              small(space.notes) if space.notes else ft.Container()], spacing=10)),
             ft.ResponsiveRow([
                 card(ft.Column([editor.content,
@@ -1872,7 +2022,7 @@ class LighthouseApp:
         controls = [self.heading("All lights", "Live bridge inventory ",
                                  button("Refresh lights", self.bind(self.refresh_lights), ft.Icons.REFRESH))]
         if not self.lights:
-            controls.append(self.empty("Connect your Hue Bridge", "Your available lights will appear here after connecting.",
+            controls.append(self.empty("First pair lights on your Hue app then connect your Hue Bridge", "Your available lights will appear here after connecting.",
                                        "Bridge settings", self.bind(self.go, "settings")))
             return self.screen(controls)
         search = field("Find a light", prefix_icon=ft.Icons.SEARCH)
@@ -2271,12 +2421,6 @@ class LighthouseApp:
     def settings_view(self):
         self.ip_field = field("Hue Bridge IP address", self.project.bridge_ip if not self.demo else "Demo bridge", expand=True)
         self.ip_field.disabled = self.demo
-        auto = ft.Checkbox(label="Reconnect to this Bridge when Lighthouse starts", value=self.project.auto_connect,
-                           disabled=self.demo)
-        def auto_changed(e):
-            self.project.auto_connect = bool(auto.value)
-            self.persist()
-        auto.on_change = auto_changed
         title = field("Workspace name", self.project.title, expand=True)
         def save_title():
             self.project.title = (title.value or "My Lighthouse").strip()[:100]
@@ -2292,14 +2436,14 @@ class LighthouseApp:
                 ft.Row([button("Connect / Register", self.bind(self.connect), ft.Icons.LINK, primary=True, disabled=self.demo),
                         button("Refresh lights", self.bind(self.refresh_lights), ft.Icons.REFRESH),
                         button("Disconnect", self.bind(self.disconnect), ft.Icons.LINK_OFF, disabled=self.demo)],
-                       wrap=True, spacing=8, run_spacing=8), auto,
+                       wrap=True, spacing=8, run_spacing=8),
                 small("Discovery needs internet( also press the button on the Bridge for pairing). Normal control uses the Bridge IP locally "
                       "Previously saved Lighthouse credentials are reused when available."),
                 text("Bound Bridge: " + (self.project.bridge_id or "Not bound yet"), 12, MUTED, selectable=True)], spacing=16)),
             card(ft.Column([
                 text("Workspace", 20, weight=ft.FontWeight.W_600), ft.Row([title, button("Save name", self.bind(save_title))]),
-                small("Spaces, light assignments and schedules are saved automatically. Export JSON for a portable backup. "
-                      ""),
+                small("Import JSON to restore spaces, light assignments "
+                      "and schedules. Changes are autosaved; Export JSON creates a portable backup."),
                 ft.Row([button("Import JSON", self.bind(self.import_project), ft.Icons.UPLOAD_FILE),
                         button("Export JSON", self.bind(self.export_project), ft.Icons.DOWNLOAD),
                         button("Import schedules CSV", self.bind(self.import_csv)),
@@ -2545,13 +2689,6 @@ class LighthouseApp:
                        self.page.run_task(self.ui_loop)]
         if self.demo:
             self.persist()
-        elif self.project.auto_connect and self.project.bridge_ip:
-            try:
-                await self.connect(self.project.bridge_ip, allow_register=False)
-            except Exception as ex:
-                self.log(f"Automatic connection failed: {ex}. Use Connect / Register in Bridge settings.", "warning")
-        if not self.project.spaces:
-            self.create_spaces_dialog()
         self.update()
 
     async def engine_loop(self):
@@ -2600,7 +2737,8 @@ class LighthouseApp:
             await self.shutdown()
             await self.page.window.destroy()
         self.confirm("Close Lighthouse?", "Scheduled changes stop when this application closes. "
-                     "Your workspace will be saved; lights will remain in their current state.", close)
+                     "Your changes are saved automatically; lights will remain in their current state. "
+                     , close)
 
     async def on_session_close(self, e):
         await self.shutdown()
@@ -2626,7 +2764,7 @@ class LighthouseApp:
 def main():
     parser = argparse.ArgumentParser(description="Lighthouse Spaces — modern Flet desktop Hue controller")
     parser.add_argument("--demo", action="store_true", help="Simulated bridge; does not control real lights")
-    parser.add_argument("--workspace", type=Path, help="Autosaved workspace JSON path; defaults to ~/.lighthouse_flet/workspace.json")
+    parser.add_argument("--workspace", type=Path, help="Autosave destination; defaults to ~/.lighthouse_flet/workspace.json. Use Import JSON to load a project.")
     args = parser.parse_args()
     if ft is None:
         raise SystemExit('Flet is not installed. Run: python -m pip install "flet[desktop]==1.0.0" "requests>=2.32,<3"')
