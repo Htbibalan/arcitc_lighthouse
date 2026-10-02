@@ -173,10 +173,10 @@ For behavioural and circadian experiments:
 * Verify the the light and colour transitions before leaving the experiment unattended ( Manually change date/time on the computer)
 * Keep a written record of the protocol used in each experiment.
 
+
 ## Citation
 
-**Taghipourbibalan, H. (2026).** *Lighthouse* (Version 1.0.0) [Software]. Zenodo.  
-https://doi.org/10.5281/zenodo.23099376
+Taghipourbibalan, H., & Tomotani, B. M. (2026). *Lighthouse* (Version 1.0.0) [Software]. Zenodo. https://doi.org/10.5281/zenodo.23099376
 
 ## to do ⚙️
 
