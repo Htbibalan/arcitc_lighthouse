@@ -1,6 +1,14 @@
 # lighthouse 💡
 [This repository is under construction 🏗️🚧🏗️🚧👷🏻‍♂️]
-Lighthouse is a python GUI to control philips lights. 
+ 
+
+
+
+
+[![DOI](https://zenodo.org/badge/1375571457.svg)](https://doi.org/10.5281/zenodo.23099375)
+
+Lighthouse is a Python GUI for controlling and scheduling Philips Hue lights.
+
 
 
 ![Banner Image](src/cover_0.png)
